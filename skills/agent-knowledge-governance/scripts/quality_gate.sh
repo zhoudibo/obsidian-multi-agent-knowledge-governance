@@ -75,8 +75,19 @@ check_1_no_raw_overwrite() {
 check_2_secret_scan() {
   echo "[2/15] secret 扫描..."
   local hits
-  hits="$(tr '\n' '\0' < "$MD_LIST" | xargs -0 grep -lE '(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key)[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9_\-]{20,}' 2>/dev/null | head -20)"
-  [[ -z "$hits" ]] && hits="$(grep -lE '(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key)[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9_\-]{20,}' "$MD_LIST" 2>/dev/null | head -20)"
+  hits="$(tr '\n' '\0' < "$MD_LIST" | xargs -0 python3 -c '
+import sys, re
+pat = re.compile(r"(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key)\s*[:=]\s*[\"\x27]?[A-Za-z0-9_\-]{20,}", re.I)
+n = 0
+for path in sys.argv[1:]:
+    if n >= 20: break
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            if pat.search(f.read()):
+                print(path); n += 1
+    except OSError:
+        pass
+' 2>/dev/null)"
   local n=0
   [[ -n "$hits" ]] && n="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
   # 明确禁止入库的文件类型
@@ -139,9 +150,33 @@ check_3_source_exists() {
 # ── 4. 日期有效性 ───────────────────────────────────────
 check_4_date_valid() {
   echo "[4/15] 日期有效性检查..."
+  # 用 Python 单次遍历（grep -rhoE 在 1 万+ 文件上需 80+ 秒，Python 约 5 秒）
   local future
-  future="$(grep -rhoE '\b(20[3-9][0-9]|2[1-9][0-9]{2})-[0-9]{2}-[0-9]{2}\b' "$VAULT" \
-            --include="*.md" 2>/dev/null | sort -u | awk -v t="$TODAY" '$0 > t' | head -5)"
+  future="$(tr '\n' '\0' < "$MD_LIST" | xargs -0 python3 -c '
+import sys, re
+from datetime import date
+today = date.today()
+# 非捕获组：findall 返回完整日期字符串（用捕获组会只返回年份）
+pat = re.compile(r"\b(?:20[3-9][0-9]|2[1-9][0-9]{2})-[0-9]{2}-[0-9]{2}\b")
+found = set()
+for path in sys.argv[1:]:
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+    except OSError:
+        continue
+    for s in pat.findall(text):
+        try:
+            y, mo, dd = (int(x) for x in s.split("-"))
+            d = date(y, mo, dd)
+        except ValueError:
+            found.add(s + " (非法日期)")   # 非法日期本身就是问题，不能跳过
+            continue
+        if d > today:
+            found.add(s)
+for d in sorted(found)[:5]:
+    print(d)
+' 2>/dev/null)"
   local n=0; [[ -n "$future" ]] && n="$(printf '%s\n' "$future" | wc -l | tr -d ' ')"
   if [[ $n -eq 0 ]]; then
     echo "  ✅ PASS: 无未来日期"; PASSED=$((PASSED+1))
